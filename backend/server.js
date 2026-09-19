@@ -6,6 +6,7 @@ const pool = require('./src/config/db');
 require('./src/config/redis');
 
 const authRoutes = require('./src/routes/authRoutes');
+const problemRoutes = require('./src/routes/problemRoutes');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -27,6 +28,7 @@ app.get('/api/health/db', async (req, res) => {
 });
 
 app.use('/api/auth', authRoutes);
+app.use('/api/problems', problemRoutes);
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
