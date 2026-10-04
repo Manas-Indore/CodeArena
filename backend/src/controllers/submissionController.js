@@ -2,14 +2,15 @@ const { validationResult } = require('express-validator');
 const pool = require('../config/db');
 const {
   createSubmission,
-  updateSubmissionResult,
   getSubmissionById,
   listSubmissionsByUser,
 } = require('../models/submissionModel');
 const { getAllTestCasesByProblemId } = require('../models/problemModel');
-const { runSubmission, LANGUAGE_CONFIG } = require('../services/judgeService');
+const { LANGUAGE_CONFIG } = require('../services/judgeService');
+const { submissionQueue } = require('../config/queue');
 
 // POST /api/submissions
+// Creates a pending submission, enqueues a judge job, returns immediately.
 async function submit(req, res) {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -26,7 +27,7 @@ async function submit(req, res) {
 
   try {
     const problemResult = await pool.query(
-      `SELECT id, time_limit_ms, memory_limit_mb FROM problems WHERE slug = $1 AND is_published = true`,
+      `SELECT id FROM problems WHERE slug = $1 AND is_published = true`,
       [problemSlug]
     );
     const problem = problemResult.rows[0];
@@ -47,32 +48,16 @@ async function submit(req, res) {
       code,
     });
 
-    const judgeResult = await runSubmission({
-      language,
-      code,
-      testCases,
-      timeLimitMs: problem.time_limit_ms,
-      memoryLimitMb: problem.memory_limit_mb,
-    });
+    // Enqueue — worker.js picks this up, runs the judge, updates the DB
+    await submissionQueue.add('judge', { submissionId: submission.id });
 
-    const updated = await updateSubmissionResult(submission.id, {
-      verdict: judgeResult.verdict,
-      runtimeMs: judgeResult.runtimeMs,
-      memoryKb: judgeResult.memoryKb,
-      testsPassed: judgeResult.testsPassed,
-      testsTotal: judgeResult.testsTotal,
-    });
-
-    res.status(201).json({
+    res.status(202).json({
       submission: {
-        id: updated.id,
-        verdict: updated.verdict,
-        testsPassed: updated.tests_passed,
-        testsTotal: updated.tests_total,
-        runtimeMs: updated.runtime_ms,
-        createdAt: updated.created_at,
+        id: submission.id,
+        verdict: submission.verdict, // 'pending'
+        createdAt: submission.created_at,
       },
-      errorOutput: judgeResult.errorOutput || undefined,
+      message: 'Submission queued. Poll GET /api/submissions/:id for the result.',
     });
   } catch (err) {
     console.error('Submit error:', err);

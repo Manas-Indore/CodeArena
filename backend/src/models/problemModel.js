@@ -118,10 +118,21 @@ async function getAllTestCasesByProblemId(problemId) {
   return result.rows;
 }
 
+// Get a problem by its internal id — used by the worker (not the public API)
+async function getProblemById(id) {
+  const result = await pool.query(
+    `SELECT id, title, slug, description, difficulty, time_limit_ms, memory_limit_mb, created_at
+     FROM problems WHERE id = $1`,
+    [id]
+  );
+  return result.rows[0];
+}
+
 module.exports = {
   createProblem,
   listProblems,
   getProblemBySlug,
+  getProblemById,
   getAllTestCasesByProblemId,
   slugify,
 };
