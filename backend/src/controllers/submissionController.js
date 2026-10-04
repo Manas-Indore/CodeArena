@@ -7,7 +7,7 @@ const {
   listSubmissionsByUser,
 } = require('../models/submissionModel');
 const { getAllTestCasesByProblemId } = require('../models/problemModel');
-const { runJavaSubmission } = require('../services/judgeService');
+const { runSubmission, LANGUAGE_CONFIG } = require('../services/judgeService');
 
 // POST /api/submissions
 async function submit(req, res) {
@@ -18,8 +18,10 @@ async function submit(req, res) {
 
   const { problemSlug, language, code } = req.body;
 
-  if (language !== 'java') {
-    return res.status(400).json({ error: 'Only Java is supported right now' });
+  if (!LANGUAGE_CONFIG[language]) {
+    return res.status(400).json({
+      error: `Unsupported language: ${language}. Supported: ${Object.keys(LANGUAGE_CONFIG).join(', ')}`,
+    });
   }
 
   try {
@@ -45,7 +47,8 @@ async function submit(req, res) {
       code,
     });
 
-    const judgeResult = await runJavaSubmission({
+    const judgeResult = await runSubmission({
+      language,
       code,
       testCases,
       timeLimitMs: problem.time_limit_ms,

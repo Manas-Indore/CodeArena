@@ -4,31 +4,66 @@ const path = require('path');
 const { randomUUID } = require('crypto');
 
 const TMP_ROOT = path.join(__dirname, '../../tmp/submissions');
-const JAVA_IMAGE = 'eclipse-temurin:17-jdk-alpine';
-const COMPILE_TIMEOUT_MS = 10000;
+const JUDGE_IMAGE = 'codearena-judge:latest';
+const COMPILE_TIMEOUT_MS = 15000;
 const DEFAULT_MEMORY_MB = 256;
 
-// Runs a full Java submission against all provided test cases.
+// Each supported language: filename to write the code as, optional compile
+// command (null = interpreted language, no compile step), and run command.
+const LANGUAGE_CONFIG = {
+  java: {
+    filename: 'Main.java',
+    compileCmd: ['javac', 'Main.java'],
+    runCmd: ['java', 'Main'],
+  },
+  python: {
+    filename: 'main.py',
+    compileCmd: null,
+    runCmd: ['python3', 'main.py'],
+  },
+  cpp: {
+    filename: 'main.cpp',
+    compileCmd: ['g++', '-O2', '-o', 'main', 'main.cpp'],
+    runCmd: ['./main'],
+  },
+  javascript: {
+    filename: 'main.js',
+    compileCmd: null,
+    runCmd: ['node', 'main.js'],
+  },
+};
+
+// Runs a full submission (any supported language) against all test cases.
 // Returns a verdict summary — never throws (errors are captured as verdicts).
-async function runJavaSubmission({ code, testCases, timeLimitMs = 2000, memoryLimitMb = DEFAULT_MEMORY_MB }) {
+async function runSubmission({ language, code, testCases, timeLimitMs = 2000, memoryLimitMb = DEFAULT_MEMORY_MB }) {
+  const config = LANGUAGE_CONFIG[language];
+  if (!config) {
+    throw new Error(`Unsupported language: ${language}`);
+  }
+
   const workDir = path.join(TMP_ROOT, randomUUID());
   await fs.mkdir(workDir, { recursive: true });
 
   try {
-    // Submitted code MUST define: public class Main { public static void main(String[] args) {...} }
-    await fs.writeFile(path.join(workDir, 'Main.java'), code, 'utf-8');
+    await fs.writeFile(path.join(workDir, config.filename), code, 'utf-8');
 
-    // ---- Compile step (once) ----
-    const compileResult = await compileJava(workDir);
-    if (!compileResult.success) {
-      return {
-        verdict: 'compile_error',
-        testsPassed: 0,
-        testsTotal: testCases.length,
-        runtimeMs: null,
-        memoryKb: null,
-        errorOutput: compileResult.stderr,
-      };
+    // ---- Compile step (skipped for interpreted languages) ----
+    if (config.compileCmd) {
+      const compileResult = await runInContainer(workDir, config.compileCmd, {
+        timeoutMs: COMPILE_TIMEOUT_MS,
+        input: null,
+      });
+
+      if (compileResult.exitCode !== 0) {
+        return {
+          verdict: 'compile_error',
+          testsPassed: 0,
+          testsTotal: testCases.length,
+          runtimeMs: null,
+          memoryKb: null,
+          errorOutput: compileResult.stderr,
+        };
+      }
     }
 
     // ---- Run step (once per test case) ----
@@ -38,7 +73,11 @@ async function runJavaSubmission({ code, testCases, timeLimitMs = 2000, memoryLi
     let errorOutput = null;
 
     for (const tc of testCases) {
-      const runResult = await runJava(workDir, tc.input, timeLimitMs, memoryLimitMb);
+      const runResult = await runInContainer(workDir, config.runCmd, {
+        timeoutMs: timeLimitMs,
+        input: tc.input,
+        memoryLimitMb,
+      });
 
       if (runResult.timedOut) {
         verdict = 'time_limit_exceeded';
@@ -69,7 +108,7 @@ async function runJavaSubmission({ code, testCases, timeLimitMs = 2000, memoryLi
       testsPassed,
       testsTotal: testCases.length,
       runtimeMs: maxRuntimeMs || null,
-      memoryKb: null, // precise memory tracking deferred — needs docker stats, out of scope for Day 5
+      memoryKb: null, // precise memory tracking deferred to a later day
       errorOutput,
     };
   } finally {
@@ -77,49 +116,21 @@ async function runJavaSubmission({ code, testCases, timeLimitMs = 2000, memoryLi
   }
 }
 
-function compileJava(workDir) {
-  return new Promise((resolve) => {
-    const args = [
-      'run', '--rm',
-      '--network', 'none',
-      '-v', `${workDir}:/code`,
-      '-w', '/code',
-      JAVA_IMAGE,
-      'javac', 'Main.java',
-    ];
-
-    const proc = spawn('docker', args);
-    let stderr = '';
-
-    const timer = setTimeout(() => proc.kill('SIGKILL'), COMPILE_TIMEOUT_MS);
-
-    proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
-
-    proc.on('close', (exitCode) => {
-      clearTimeout(timer);
-      resolve({ success: exitCode === 0, stderr });
-    });
-
-    proc.on('error', (err) => {
-      clearTimeout(timer);
-      resolve({ success: false, stderr: err.message });
-    });
-  });
-}
-
-function runJava(workDir, input, timeLimitMs, memoryLimitMb) {
+// Generic container runner — used for both compile and run steps, any language.
+function runInContainer(workDir, command, { timeoutMs, input, memoryLimitMb }) {
   return new Promise((resolve) => {
     const args = [
       'run', '-i', '--rm',
       '--network', 'none',
-      `--memory=${memoryLimitMb}m`,
-      '--cpus=1',
-      '--pids-limit=64',
       '-v', `${workDir}:/code`,
       '-w', '/code',
-      JAVA_IMAGE,
-      'java', 'Main',
     ];
+
+    if (memoryLimitMb) {
+      args.push(`--memory=${memoryLimitMb}m`, '--cpus=1', '--pids-limit=64');
+    }
+
+    args.push(JUDGE_IMAGE, ...command);
 
     const proc = spawn('docker', args);
 
@@ -131,7 +142,7 @@ function runJava(workDir, input, timeLimitMs, memoryLimitMb) {
     const timer = setTimeout(() => {
       timedOut = true;
       proc.kill('SIGKILL');
-    }, timeLimitMs);
+    }, timeoutMs);
 
     proc.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
     proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
@@ -146,9 +157,11 @@ function runJava(workDir, input, timeLimitMs, memoryLimitMb) {
       resolve({ stdout: '', stderr: err.message, exitCode: 1, timedOut: false, durationMs: Date.now() - startTime });
     });
 
-    proc.stdin.write(input);
+    if (input !== null && input !== undefined) {
+      proc.stdin.write(input);
+    }
     proc.stdin.end();
   });
 }
 
-module.exports = { runJavaSubmission };
+module.exports = { runSubmission, LANGUAGE_CONFIG };
