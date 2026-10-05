@@ -6,18 +6,20 @@ const {
   listSubmissionsByUser,
 } = require('../models/submissionModel');
 const { getAllTestCasesByProblemId } = require('../models/problemModel');
+const { getMatchById, isParticipant } = require('../models/matchModel');
 const { LANGUAGE_CONFIG } = require('../services/judgeService');
 const { submissionQueue } = require('../config/queue');
 
 // POST /api/submissions
 // Creates a pending submission, enqueues a judge job, returns immediately.
+// Optional matchId ties this submission to a live Online Mode match.
 async function submit(req, res) {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
     return res.status(400).json({ errors: errors.array() });
   }
 
-  const { problemSlug, language, code } = req.body;
+  const { problemSlug, language, code, matchId } = req.body;
 
   if (!LANGUAGE_CONFIG[language]) {
     return res.status(400).json({
@@ -40,21 +42,32 @@ async function submit(req, res) {
       return res.status(400).json({ error: 'This problem has no test cases yet' });
     }
 
+    if (matchId) {
+      const match = await getMatchById(matchId);
+      if (!match) return res.status(404).json({ error: 'Match not found' });
+      if (match.status !== 'in_progress') {
+        return res.status(400).json({ error: 'Match is not currently in progress' });
+      }
+      const participant = await isParticipant(matchId, req.userId);
+      if (!participant) {
+        return res.status(403).json({ error: 'You are not a participant in this match' });
+      }
+    }
+
     const submission = await createSubmission({
       userId: req.userId,
       problemId: problem.id,
-      matchId: null,
+      matchId: matchId || null,
       language,
       code,
     });
 
-    // Enqueue — worker.js picks this up, runs the judge, updates the DB
     await submissionQueue.add('judge', { submissionId: submission.id });
 
     res.status(202).json({
       submission: {
         id: submission.id,
-        verdict: submission.verdict, // 'pending'
+        verdict: submission.verdict,
         createdAt: submission.created_at,
       },
       message: 'Submission queued. Poll GET /api/submissions/:id for the result.',

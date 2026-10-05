@@ -4,6 +4,8 @@ const { Worker } = require('bullmq');
 const { connection } = require('./src/config/queue');
 const { getSubmissionById, updateSubmissionResult } = require('./src/models/submissionModel');
 const { getProblemById, getAllTestCasesByProblemId } = require('./src/models/problemModel');
+const { completeMatch } = require('./src/models/matchModel');
+const { publishMatchEvent } = require('./src/config/redisPubSub');
 const { runSubmission } = require('./src/services/judgeService');
 
 console.log('Judge worker started, waiting for jobs...');
@@ -45,8 +47,34 @@ const worker = new Worker(
     });
 
     console.log(`Submission ${submissionId} verdict: ${judgeResult.verdict}`);
+
+    // ---- Match integration (only relevant for Online Mode submissions) ----
+    if (submission.match_id) {
+      await publishMatchEvent({
+        matchId: submission.match_id,
+        type: 'progress_update',
+        payload: {
+          userId: submission.user_id,
+          verdict: judgeResult.verdict,
+          testsPassed: judgeResult.testsPassed,
+          testsTotal: judgeResult.testsTotal,
+        },
+      });
+
+      if (judgeResult.verdict === 'accepted') {
+        const completed = await completeMatch(submission.match_id, submission.user_id);
+        if (completed) {
+          await publishMatchEvent({
+            matchId: submission.match_id,
+            type: 'match_completed',
+            payload: { winnerUserId: submission.user_id },
+          });
+          console.log(`Match ${submission.match_id} completed — winner: ${submission.user_id}`);
+        }
+      }
+    }
   },
-  { connection, concurrency: 2 } // judges up to 2 submissions in parallel
+  { connection, concurrency: 2 }
 );
 
 worker.on('failed', (job, err) => {
