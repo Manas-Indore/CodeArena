@@ -11,13 +11,27 @@ const {
   startMatch,
 } = require('../models/matchModel');
 const { getProblemById } = require('../models/problemModel');
+const {
+  findOrQueue,
+  removeFromQueue,
+  removeFromAllQueues,
+  createMatchForPair,
+} = require('../services/matchmakingService');
+
+const MATCHMAKING_MODES = ['speed_coding', 'debug_duel'];
+
+function findSocketByUserId(io, userId) {
+  for (const [, s] of io.sockets.sockets) {
+    if (s.userId === userId) return s;
+  }
+  return null;
+}
 
 function setupSocket(httpServer) {
   const io = new Server(httpServer, {
     cors: { origin: '*' },
   });
 
-  // Every socket connection must present a valid JWT (sent via `auth.token` on connect)
   io.use((socket, next) => {
     const token = socket.handshake.auth?.token;
     if (!token) return next(new Error('No token provided'));
@@ -33,6 +47,8 @@ function setupSocket(httpServer) {
 
   io.on('connection', (socket) => {
     console.log(`Socket connected: user ${socket.userId}`);
+
+    // ---------------- Open Battle lobby (Day 8) ----------------
 
     socket.on('join_lobby', async ({ matchId }) => {
       try {
@@ -60,13 +76,13 @@ function setupSocket(httpServer) {
           maxPlayers: match.max_players,
         });
 
-        // Auto-start the match once the lobby is full
         if (participants.length >= match.max_players) {
           const updatedMatch = await startMatch(matchId);
           const problem = await getProblemById(updatedMatch.problem_id);
 
           io.to(`match:${matchId}`).emit('match_started', {
             matchId,
+            mode: updatedMatch.mode,
             problem: {
               title: problem.title,
               slug: problem.slug,
@@ -83,13 +99,77 @@ function setupSocket(httpServer) {
       }
     });
 
-    socket.on('disconnect', () => {
+    // ---------------- 1v1 Matchmaking (Day 9) ----------------
+
+    socket.on('find_match', async ({ mode }) => {
+      if (!MATCHMAKING_MODES.includes(mode)) {
+        return socket.emit('error_message', { error: `Invalid mode. Must be one of: ${MATCHMAKING_MODES.join(', ')}` });
+      }
+
+      try {
+        const result = await findOrQueue(socket.userId, mode);
+
+        if (!result.matched) {
+          socket.matchmakingMode = mode;
+          socket.emit('queued', { mode, message: 'Searching for an opponent...' });
+          return;
+        }
+
+        // Paired! Create the match and put both sockets in the room.
+        const { match, problem } = await createMatchForPair(mode, socket.userId, result.opponentUserId);
+
+        socket.join(`match:${match.id}`);
+        socket.matchId = match.id;
+        socket.matchmakingMode = null;
+
+        const opponentSocket = findSocketByUserId(io, result.opponentUserId);
+        if (opponentSocket) {
+          opponentSocket.join(`match:${match.id}`);
+          opponentSocket.matchId = match.id;
+          opponentSocket.matchmakingMode = null;
+        }
+
+        io.to(`match:${match.id}`).emit('match_started', {
+          matchId: match.id,
+          mode: match.mode,
+          problem: {
+            title: problem.title,
+            slug: problem.slug,
+            description: problem.description,
+            difficulty: problem.difficulty,
+            timeLimitMs: problem.time_limit_ms,
+          },
+          startedAt: match.started_at,
+        });
+      } catch (err) {
+        console.error('find_match error:', err);
+        socket.emit('error_message', { error: 'Matchmaking failed' });
+      }
+    });
+
+    socket.on('cancel_matchmaking', async ({ mode }) => {
+      try {
+        await removeFromQueue(socket.userId, mode);
+        socket.matchmakingMode = null;
+        socket.emit('matchmaking_cancelled', { mode });
+      } catch (err) {
+        console.error('cancel_matchmaking error:', err);
+      }
+    });
+
+    // ---------------- Disconnect cleanup ----------------
+
+    socket.on('disconnect', async () => {
       console.log(`Socket disconnected: user ${socket.userId}`);
+      try {
+        await removeFromAllQueues(socket.userId);
+      } catch (err) {
+        console.error('Error cleaning up queues on disconnect:', err);
+      }
     });
   });
 
-  // Subscribe to Redis — this is how worker.js (a separate process) gets its
-  // judging results broadcast to the right Socket.IO room on this server.
+  // Redis subscriber — worker.js publishes judging results here
   const subscriber = new IORedis(process.env.REDIS_URL);
   subscriber.subscribe(MATCH_EVENTS_CHANNEL);
 
