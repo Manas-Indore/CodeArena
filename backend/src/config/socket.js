@@ -16,6 +16,7 @@ const {
   removeFromQueue,
   removeFromAllQueues,
   createMatchForPair,
+  getUserRating,
 } = require('../services/matchmakingService');
 
 const MATCHMAKING_MODES = ['speed_coding', 'debug_duel'];
@@ -58,6 +59,15 @@ function setupSocket(httpServer) {
         }
         if (match.status !== 'waiting') {
           return socket.emit('error_message', { error: 'Match already started or finished' });
+        }
+
+        if (match.min_rating !== null) {
+          const rating = await getUserRating(socket.userId, match.mode);
+          if (rating < match.min_rating) {
+            return socket.emit('error_message', {
+              error: `Rating too low to join. Need at least ${match.min_rating} (yours: ${rating})`,
+            });
+          }
         }
 
         const currentCount = await countParticipants(matchId);
