@@ -2,8 +2,10 @@ const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
 const IORedis = require('ioredis');
 
+const pool = require('../config/db');
 const { MATCH_EVENTS_CHANNEL } = require('./redisPubSub');
 const {
+  createMatch,
   addParticipant,
   countParticipants,
   getMatchById,
@@ -11,6 +13,7 @@ const {
   startMatch,
 } = require('../models/matchModel');
 const { getProblemById } = require('../models/problemModel');
+const { areFriends } = require('../models/friendModel');
 const {
   findOrQueue,
   removeFromQueue,
@@ -20,6 +23,7 @@ const {
 } = require('../services/matchmakingService');
 
 const MATCHMAKING_MODES = ['speed_coding', 'debug_duel'];
+const CHALLENGE_MODES = ['speed_coding', 'debug_duel'];
 
 function findSocketByUserId(io, userId) {
   for (const [, s] of io.sockets.sockets) {
@@ -49,7 +53,7 @@ function setupSocket(httpServer) {
   io.on('connection', (socket) => {
     console.log(`Socket connected: user ${socket.userId}`);
 
-    // ---------------- Open Battle lobby (Day 8) ----------------
+    // ---------------- Open/Group Battle lobby ----------------
 
     socket.on('join_lobby', async ({ matchId }) => {
       try {
@@ -109,7 +113,7 @@ function setupSocket(httpServer) {
       }
     });
 
-    // ---------------- 1v1 Matchmaking (Day 9) ----------------
+    // ---------------- 1v1 Matchmaking ----------------
 
     socket.on('find_match', async ({ mode }) => {
       if (!MATCHMAKING_MODES.includes(mode)) {
@@ -125,7 +129,6 @@ function setupSocket(httpServer) {
           return;
         }
 
-        // Paired! Create the match and put both sockets in the room.
         const { match, problem } = await createMatchForPair(mode, socket.userId, result.opponentUserId);
 
         socket.join(`match:${match.id}`);
@@ -167,6 +170,55 @@ function setupSocket(httpServer) {
       }
     });
 
+    // ---------------- Challenge a Friend ----------------
+
+    socket.on('challenge_friend', async ({ friendUserId, mode }) => {
+      try {
+        if (!CHALLENGE_MODES.includes(mode)) {
+          return socket.emit('error_message', { error: `Invalid challenge mode. Must be one of: ${CHALLENGE_MODES.join(', ')}` });
+        }
+
+        const friends = await areFriends(socket.userId, friendUserId);
+        if (!friends) {
+          return socket.emit('error_message', { error: 'You can only challenge friends' });
+        }
+
+        const problemResult = await pool.query(
+          `SELECT id FROM problems WHERE is_published = true ORDER BY RANDOM() LIMIT 1`
+        );
+        if (!problemResult.rows[0]) {
+          return socket.emit('error_message', { error: 'No published problems available' });
+        }
+
+        const match = await createMatch({
+          mode,
+          problemId: problemResult.rows[0].id,
+          maxPlayers: 2,
+          minRating: null,
+        });
+
+        await addParticipant(match.id, socket.userId);
+        socket.join(`match:${match.id}`);
+        socket.matchId = match.id;
+
+        const friendSocket = findSocketByUserId(io, friendUserId);
+        if (!friendSocket) {
+          return socket.emit('error_message', { error: 'Friend is not online right now' });
+        }
+
+        friendSocket.emit('challenge_received', {
+          matchId: match.id,
+          mode,
+          fromUserId: socket.userId,
+        });
+
+        socket.emit('challenge_sent', { matchId: match.id, mode, toUserId: friendUserId });
+      } catch (err) {
+        console.error('challenge_friend error:', err);
+        socket.emit('error_message', { error: 'Failed to send challenge' });
+      }
+    });
+
     // ---------------- Disconnect cleanup ----------------
 
     socket.on('disconnect', async () => {
@@ -179,7 +231,6 @@ function setupSocket(httpServer) {
     });
   });
 
-  // Redis subscriber — worker.js publishes judging results here
   const subscriber = new IORedis(process.env.REDIS_URL);
   subscriber.subscribe(MATCH_EVENTS_CHANNEL);
 

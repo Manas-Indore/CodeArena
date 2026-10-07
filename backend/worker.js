@@ -7,6 +7,7 @@ const { getProblemById, getAllTestCasesByProblemId } = require('./src/models/pro
 const { completeMatch } = require('./src/models/matchModel');
 const { publishMatchEvent } = require('./src/config/redisPubSub');
 const { runSubmission } = require('./src/services/judgeService');
+const { applyEloUpdates } = require('./src/services/ratingService');
 
 console.log('Judge worker started, waiting for jobs...');
 
@@ -48,7 +49,6 @@ const worker = new Worker(
 
     console.log(`Submission ${submissionId} verdict: ${judgeResult.verdict}`);
 
-    // ---- Match integration (only relevant for Online Mode submissions) ----
     if (submission.match_id) {
       await publishMatchEvent({
         matchId: submission.match_id,
@@ -70,6 +70,12 @@ const worker = new Worker(
             payload: { winnerUserId: submission.user_id },
           });
           console.log(`Match ${submission.match_id} completed — winner: ${submission.user_id}`);
+
+          // Open Battles are casual — no rating impact. Everything else counts.
+          if (completed.mode !== 'open_battle') {
+            await applyEloUpdates(completed.id, completed.mode, submission.user_id);
+            console.log(`Elo updated for match ${completed.id} (mode: ${completed.mode})`);
+          }
         }
       }
     }

@@ -115,6 +115,13 @@ async function isParticipant(matchId, userId) {
   return result.rowCount > 0;
 }
 
+async function setParticipantRatingChange(matchId, userId, ratingBefore, ratingAfter) {
+  await pool.query(
+    `UPDATE match_participants SET rating_before = $1, rating_after = $2 WHERE match_id = $3 AND user_id = $4`,
+    [ratingBefore, ratingAfter, matchId, userId]
+  );
+}
+
 module.exports = {
   createMatch,
   getMatchById,
@@ -125,4 +132,5 @@ module.exports = {
   startMatch,
   completeMatch,
   isParticipant,
+  setParticipantRatingChange,
 };

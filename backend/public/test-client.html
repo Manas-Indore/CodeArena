@@ -23,20 +23,31 @@
   </div>
 
   <div class="section">
-    <h3>Open Battle (Day 8)</h3>
+    <h3>Open / Group Battle Lobby</h3>
     <label>Match ID:</label><br/>
     <input id="matchId" placeholder="paste match id here" />
     <button onclick="joinLobby()">Join Lobby</button>
   </div>
 
   <div class="section">
-    <h3>1v1 Matchmaking (Day 9)</h3>
+    <h3>1v1 Matchmaking</h3>
     <select id="mode">
       <option value="speed_coding">Speed Coding</option>
       <option value="debug_duel">Debug Duel</option>
     </select>
     <button onclick="findMatch()">Find Match</button>
     <button onclick="cancelMatchmaking()">Cancel</button>
+  </div>
+
+  <div class="section">
+    <h3>Challenge a Friend</h3>
+    <label>Friend's User ID (UUID):</label><br/>
+    <input id="friendUserId" placeholder="paste friend's user id here" />
+    <select id="challengeMode">
+      <option value="speed_coding">Speed Coding</option>
+      <option value="debug_duel">Debug Duel</option>
+    </select>
+    <button onclick="challengeFriend()">Send Challenge</button>
   </div>
 
   <div id="log"></div>
@@ -71,6 +82,8 @@
       socket.on('match_completed', (data) => log('match_completed: ' + JSON.stringify(data)));
       socket.on('queued', (data) => log('queued: ' + JSON.stringify(data)));
       socket.on('matchmaking_cancelled', (data) => log('matchmaking_cancelled: ' + JSON.stringify(data)));
+      socket.on('challenge_received', (data) => log('challenge_received: ' + JSON.stringify(data)));
+      socket.on('challenge_sent', (data) => log('challenge_sent: ' + JSON.stringify(data)));
       socket.on('error_message', (data) => log('error_message: ' + JSON.stringify(data), 'error'));
     }
 
@@ -94,6 +107,15 @@
       const mode = document.getElementById('mode').value;
       socket.emit('cancel_matchmaking', { mode });
       log('Emitted cancel_matchmaking for mode ' + mode);
+    }
+
+    function challengeFriend() {
+      if (!socket) return alert('Connect first');
+      const friendUserId = document.getElementById('friendUserId').value.trim();
+      const mode = document.getElementById('challengeMode').value;
+      if (!friendUserId) return alert("Paste your friend's user id first");
+      socket.emit('challenge_friend', { friendUserId, mode });
+      log(`Emitted challenge_friend to ${friendUserId} (${mode})`);
     }
   </script>
 </body>
