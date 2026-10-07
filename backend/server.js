@@ -13,6 +13,7 @@ const submissionRoutes = require('./src/routes/submissionRoutes');
 const matchRoutes = require('./src/routes/matchRoutes');
 const ratingRoutes = require('./src/routes/ratingRoutes');
 const friendRoutes = require('./src/routes/friendRoutes');
+const profileRoutes = require('./src/routes/profileRoutes');
 
 const setupSocket = require('./src/config/socket');
 
@@ -42,6 +43,7 @@ app.use('/api/submissions', submissionRoutes);
 app.use('/api/matches', matchRoutes);
 app.use('/api/ratings', ratingRoutes);
 app.use('/api/friends', friendRoutes);
+app.use('/api/users', profileRoutes);
 
 const httpServer = http.createServer(app);
 setupSocket(httpServer);
