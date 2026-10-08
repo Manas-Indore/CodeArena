@@ -35,6 +35,12 @@
       <option value="speed_coding">Speed Coding</option>
       <option value="debug_duel">Debug Duel</option>
     </select>
+    <select id="difficulty">
+      <option value="">Any difficulty</option>
+      <option value="easy">Easy</option>
+      <option value="medium">Medium</option>
+      <option value="hard">Hard</option>
+    </select>
     <button onclick="findMatch()">Find Match</button>
     <button onclick="cancelMatchmaking()">Cancel</button>
   </div>
@@ -46,6 +52,12 @@
     <select id="challengeMode">
       <option value="speed_coding">Speed Coding</option>
       <option value="debug_duel">Debug Duel</option>
+    </select>
+    <select id="challengeDifficulty">
+      <option value="">Any difficulty</option>
+      <option value="easy">Easy</option>
+      <option value="medium">Medium</option>
+      <option value="hard">Hard</option>
     </select>
     <button onclick="challengeFriend()">Send Challenge</button>
   </div>
@@ -98,24 +110,27 @@
     function findMatch() {
       if (!socket) return alert('Connect first');
       const mode = document.getElementById('mode').value;
-      socket.emit('find_match', { mode });
-      log('Emitted find_match for mode ' + mode);
+      const difficulty = document.getElementById('difficulty').value || undefined;
+      socket.emit('find_match', { mode, difficulty });
+      log(`Emitted find_match (${mode}, ${difficulty || 'any'})`);
     }
 
     function cancelMatchmaking() {
       if (!socket) return alert('Connect first');
       const mode = document.getElementById('mode').value;
-      socket.emit('cancel_matchmaking', { mode });
-      log('Emitted cancel_matchmaking for mode ' + mode);
+      const difficulty = document.getElementById('difficulty').value || undefined;
+      socket.emit('cancel_matchmaking', { mode, difficulty });
+      log(`Emitted cancel_matchmaking (${mode}, ${difficulty || 'any'})`);
     }
 
     function challengeFriend() {
       if (!socket) return alert('Connect first');
       const friendUserId = document.getElementById('friendUserId').value.trim();
       const mode = document.getElementById('challengeMode').value;
+      const difficulty = document.getElementById('challengeDifficulty').value || undefined;
       if (!friendUserId) return alert("Paste your friend's user id first");
-      socket.emit('challenge_friend', { friendUserId, mode });
-      log(`Emitted challenge_friend to ${friendUserId} (${mode})`);
+      socket.emit('challenge_friend', { friendUserId, mode, difficulty });
+      log(`Emitted challenge_friend to ${friendUserId} (${mode}, ${difficulty || 'any'})`);
     }
   </script>
 </body>

@@ -5,11 +5,13 @@ const { getProblemById } = require('../models/problemModel');
 
 const redis = new IORedis(process.env.REDIS_URL);
 
-const RATING_WINDOW = 200; // pair players within +/- 200 rating points
-const DEFAULT_RATING = 1200; // used until Day 10's Elo system populates real ratings
+const RATING_WINDOW = 200;
+const DEFAULT_RATING = 1200;
+const VALID_DIFFICULTIES = ['easy', 'medium', 'hard'];
 
-function queueKey(mode) {
-  return `matchmaking:queue:${mode}`;
+function queueKey(mode, difficulty) {
+  const diffPart = difficulty && VALID_DIFFICULTIES.includes(difficulty) ? difficulty : 'any';
+  return `matchmaking:queue:${mode}:${diffPart}`;
 }
 
 async function getUserRating(userId, mode) {
@@ -20,12 +22,10 @@ async function getUserRating(userId, mode) {
   return result.rows[0]?.rating ?? DEFAULT_RATING;
 }
 
-// Tries to pair `userId` with someone already waiting in this mode's queue.
-// If no one suitable is waiting, adds `userId` to the queue instead.
-// Returns { matched: true, opponentUserId } or { matched: false }.
-async function findOrQueue(userId, mode) {
+// Tries to pair `userId` with someone already waiting in this mode+difficulty queue.
+async function findOrQueue(userId, mode, difficulty) {
   const rating = await getUserRating(userId, mode);
-  const key = queueKey(mode);
+  const key = queueKey(mode, difficulty);
 
   const candidates = await redis.zrangebyscore(
     key,
@@ -34,7 +34,6 @@ async function findOrQueue(userId, mode) {
     'WITHSCORES'
   );
 
-  // candidates is flat: [userId1, score1, userId2, score2, ...]
   let opponentId = null;
   for (let i = 0; i < candidates.length; i += 2) {
     if (candidates[i] !== userId) {
@@ -44,8 +43,6 @@ async function findOrQueue(userId, mode) {
   }
 
   if (opponentId) {
-    // Atomically claim this opponent — ZREM returns 1 only if WE removed them.
-    // If someone else grabbed them first (race), it returns 0 and we fall through to re-queue.
     const removed = await redis.zrem(key, opponentId);
     if (removed === 1) {
       return { matched: true, opponentUserId: opponentId };
@@ -53,24 +50,29 @@ async function findOrQueue(userId, mode) {
   }
 
   await redis.zadd(key, rating, userId);
-  return { matched: false };
+  return { matched: false, queueKey: key };
 }
 
-async function removeFromQueue(userId, mode) {
-  await redis.zrem(queueKey(mode), userId);
+async function removeFromQueueKey(key, userId) {
+  await redis.zrem(key, userId);
 }
 
-async function removeFromAllQueues(userId) {
-  await redis.zrem(queueKey('speed_coding'), userId);
-  await redis.zrem(queueKey('debug_duel'), userId);
-}
+// Picks a random published problem, optionally filtered by difficulty.
+async function createMatchForPair(mode, userIdA, userIdB, difficulty) {
+  const values = [];
+  let whereClause = 'WHERE is_published = true';
+  if (difficulty && VALID_DIFFICULTIES.includes(difficulty)) {
+    values.push(difficulty);
+    whereClause += ` AND difficulty = $${values.length}`;
+  }
 
-// Creates the actual match + both participants once a pair is found.
-async function createMatchForPair(mode, userIdA, userIdB) {
   const problemResult = await pool.query(
-    `SELECT id FROM problems WHERE is_published = true ORDER BY RANDOM() LIMIT 1`
+    `SELECT id FROM problems ${whereClause} ORDER BY RANDOM() LIMIT 1`,
+    values
   );
-  if (!problemResult.rows[0]) throw new Error('No published problems available');
+  if (!problemResult.rows[0]) {
+    throw new Error('No published problems available for this difficulty');
+  }
 
   const match = await createMatch({
     mode,
@@ -90,8 +92,9 @@ async function createMatchForPair(mode, userIdA, userIdB) {
 
 module.exports = {
   findOrQueue,
-  removeFromQueue,
-  removeFromAllQueues,
+  removeFromQueueKey,
   createMatchForPair,
   getUserRating,
+  queueKey,
+  VALID_DIFFICULTIES,
 };

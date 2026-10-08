@@ -2,6 +2,41 @@ const { validationResult } = require('express-validator');
 const pool = require('../config/db');
 const { createMatch, listWaitingMatches } = require('../models/matchModel');
 
+// Picks a problem id: an explicit slug wins; otherwise a random published
+// problem, optionally filtered by difficulty.
+async function pickProblemId({ problemSlug, difficulty }) {
+  if (problemSlug) {
+    const result = await pool.query(
+      `SELECT id FROM problems WHERE slug = $1 AND is_published = true`,
+      [problemSlug]
+    );
+    if (!result.rows[0]) {
+      const err = new Error('Problem not found');
+      err.status = 404;
+      throw err;
+    }
+    return result.rows[0].id;
+  }
+
+  const values = [];
+  let whereClause = 'WHERE is_published = true';
+  if (difficulty) {
+    values.push(difficulty);
+    whereClause += ` AND difficulty = $${values.length}`;
+  }
+
+  const result = await pool.query(
+    `SELECT id FROM problems ${whereClause} ORDER BY RANDOM() LIMIT 1`,
+    values
+  );
+  if (!result.rows[0]) {
+    const err = new Error('No published problems available for this selection');
+    err.status = 400;
+    throw err;
+  }
+  return result.rows[0].id;
+}
+
 // POST /api/matches/open-battles
 async function createOpenBattle(req, res) {
   const errors = validationResult(req);
@@ -9,25 +44,10 @@ async function createOpenBattle(req, res) {
     return res.status(400).json({ errors: errors.array() });
   }
 
-  const { problemSlug, maxPlayers } = req.body;
+  const { problemSlug, maxPlayers, difficulty } = req.body;
 
   try {
-    let problemId;
-
-    if (problemSlug) {
-      const result = await pool.query(
-        `SELECT id FROM problems WHERE slug = $1 AND is_published = true`,
-        [problemSlug]
-      );
-      if (!result.rows[0]) return res.status(404).json({ error: 'Problem not found' });
-      problemId = result.rows[0].id;
-    } else {
-      const result = await pool.query(
-        `SELECT id FROM problems WHERE is_published = true ORDER BY RANDOM() LIMIT 1`
-      );
-      if (!result.rows[0]) return res.status(400).json({ error: 'No published problems available' });
-      problemId = result.rows[0].id;
-    }
+    const problemId = await pickProblemId({ problemSlug, difficulty });
 
     const match = await createMatch({
       mode: 'open_battle',
@@ -38,6 +58,7 @@ async function createOpenBattle(req, res) {
 
     res.status(201).json({ match });
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
     console.error('Create open battle error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -61,25 +82,10 @@ async function createGroupBattle(req, res) {
     return res.status(400).json({ errors: errors.array() });
   }
 
-  const { problemSlug, maxPlayers, minRating } = req.body;
+  const { problemSlug, maxPlayers, minRating, difficulty } = req.body;
 
   try {
-    let problemId;
-
-    if (problemSlug) {
-      const result = await pool.query(
-        `SELECT id FROM problems WHERE slug = $1 AND is_published = true`,
-        [problemSlug]
-      );
-      if (!result.rows[0]) return res.status(404).json({ error: 'Problem not found' });
-      problemId = result.rows[0].id;
-    } else {
-      const result = await pool.query(
-        `SELECT id FROM problems WHERE is_published = true ORDER BY RANDOM() LIMIT 1`
-      );
-      if (!result.rows[0]) return res.status(400).json({ error: 'No published problems available' });
-      problemId = result.rows[0].id;
-    }
+    const problemId = await pickProblemId({ problemSlug, difficulty });
 
     const match = await createMatch({
       mode: 'group_battle',
@@ -90,6 +96,7 @@ async function createGroupBattle(req, res) {
 
     res.status(201).json({ match });
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
     console.error('Create group battle error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }

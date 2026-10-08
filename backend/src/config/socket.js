@@ -16,10 +16,11 @@ const { getProblemById } = require('../models/problemModel');
 const { areFriends } = require('../models/friendModel');
 const {
   findOrQueue,
-  removeFromQueue,
-  removeFromAllQueues,
+  removeFromQueueKey,
   createMatchForPair,
   getUserRating,
+  queueKey,
+  VALID_DIFFICULTIES,
 } = require('../services/matchmakingService');
 
 const MATCHMAKING_MODES = ['speed_coding', 'debug_duel'];
@@ -115,31 +116,38 @@ function setupSocket(httpServer) {
 
     // ---------------- 1v1 Matchmaking ----------------
 
-    socket.on('find_match', async ({ mode }) => {
+    socket.on('find_match', async ({ mode, difficulty }) => {
       if (!MATCHMAKING_MODES.includes(mode)) {
         return socket.emit('error_message', { error: `Invalid mode. Must be one of: ${MATCHMAKING_MODES.join(', ')}` });
       }
+      if (difficulty && !VALID_DIFFICULTIES.includes(difficulty)) {
+        return socket.emit('error_message', { error: 'Invalid difficulty. Must be easy, medium, or hard' });
+      }
 
       try {
-        const result = await findOrQueue(socket.userId, mode);
+        const result = await findOrQueue(socket.userId, mode, difficulty);
 
         if (!result.matched) {
-          socket.matchmakingMode = mode;
-          socket.emit('queued', { mode, message: 'Searching for an opponent...' });
+          socket.matchmakingQueueKey = result.queueKey;
+          socket.emit('queued', {
+            mode,
+            difficulty: difficulty || 'any',
+            message: 'Searching for an opponent...',
+          });
           return;
         }
 
-        const { match, problem } = await createMatchForPair(mode, socket.userId, result.opponentUserId);
+        const { match, problem } = await createMatchForPair(mode, socket.userId, result.opponentUserId, difficulty);
 
         socket.join(`match:${match.id}`);
         socket.matchId = match.id;
-        socket.matchmakingMode = null;
+        socket.matchmakingQueueKey = null;
 
         const opponentSocket = findSocketByUserId(io, result.opponentUserId);
         if (opponentSocket) {
           opponentSocket.join(`match:${match.id}`);
           opponentSocket.matchId = match.id;
-          opponentSocket.matchmakingMode = null;
+          opponentSocket.matchmakingQueueKey = null;
         }
 
         io.to(`match:${match.id}`).emit('match_started', {
@@ -156,15 +164,15 @@ function setupSocket(httpServer) {
         });
       } catch (err) {
         console.error('find_match error:', err);
-        socket.emit('error_message', { error: 'Matchmaking failed' });
+        socket.emit('error_message', { error: err.message || 'Matchmaking failed' });
       }
     });
 
-    socket.on('cancel_matchmaking', async ({ mode }) => {
+    socket.on('cancel_matchmaking', async ({ mode, difficulty }) => {
       try {
-        await removeFromQueue(socket.userId, mode);
-        socket.matchmakingMode = null;
-        socket.emit('matchmaking_cancelled', { mode });
+        await removeFromQueueKey(queueKey(mode, difficulty), socket.userId);
+        socket.matchmakingQueueKey = null;
+        socket.emit('matchmaking_cancelled', { mode, difficulty: difficulty || 'any' });
       } catch (err) {
         console.error('cancel_matchmaking error:', err);
       }
@@ -172,10 +180,13 @@ function setupSocket(httpServer) {
 
     // ---------------- Challenge a Friend ----------------
 
-    socket.on('challenge_friend', async ({ friendUserId, mode }) => {
+    socket.on('challenge_friend', async ({ friendUserId, mode, difficulty }) => {
       try {
         if (!CHALLENGE_MODES.includes(mode)) {
           return socket.emit('error_message', { error: `Invalid challenge mode. Must be one of: ${CHALLENGE_MODES.join(', ')}` });
+        }
+        if (difficulty && !VALID_DIFFICULTIES.includes(difficulty)) {
+          return socket.emit('error_message', { error: 'Invalid difficulty. Must be easy, medium, or hard' });
         }
 
         const friends = await areFriends(socket.userId, friendUserId);
@@ -183,11 +194,19 @@ function setupSocket(httpServer) {
           return socket.emit('error_message', { error: 'You can only challenge friends' });
         }
 
+        const values = [];
+        let whereClause = 'WHERE is_published = true';
+        if (difficulty) {
+          values.push(difficulty);
+          whereClause += ` AND difficulty = $${values.length}`;
+        }
+
         const problemResult = await pool.query(
-          `SELECT id FROM problems WHERE is_published = true ORDER BY RANDOM() LIMIT 1`
+          `SELECT id FROM problems ${whereClause} ORDER BY RANDOM() LIMIT 1`,
+          values
         );
         if (!problemResult.rows[0]) {
-          return socket.emit('error_message', { error: 'No published problems available' });
+          return socket.emit('error_message', { error: 'No published problems available for this difficulty' });
         }
 
         const match = await createMatch({
@@ -209,10 +228,16 @@ function setupSocket(httpServer) {
         friendSocket.emit('challenge_received', {
           matchId: match.id,
           mode,
+          difficulty: difficulty || 'any',
           fromUserId: socket.userId,
         });
 
-        socket.emit('challenge_sent', { matchId: match.id, mode, toUserId: friendUserId });
+        socket.emit('challenge_sent', {
+          matchId: match.id,
+          mode,
+          difficulty: difficulty || 'any',
+          toUserId: friendUserId,
+        });
       } catch (err) {
         console.error('challenge_friend error:', err);
         socket.emit('error_message', { error: 'Failed to send challenge' });
@@ -224,9 +249,11 @@ function setupSocket(httpServer) {
     socket.on('disconnect', async () => {
       console.log(`Socket disconnected: user ${socket.userId}`);
       try {
-        await removeFromAllQueues(socket.userId);
+        if (socket.matchmakingQueueKey) {
+          await removeFromQueueKey(socket.matchmakingQueueKey, socket.userId);
+        }
       } catch (err) {
-        console.error('Error cleaning up queues on disconnect:', err);
+        console.error('Error cleaning up queue on disconnect:', err);
       }
     });
   });
