@@ -1,10 +1,12 @@
 const { validationResult } = require('express-validator');
 const pool = require('../config/db');
 const { createMatch, listWaitingMatches } = require('../models/matchModel');
+const { getProblemById } = require('../models/problemModel');
+const { getUserRating } = require('../services/matchmakingService');
+const { randomProblemId, pickProblemIdByRating } = require('../services/difficultyService');
 
-// Picks a problem id: an explicit slug wins; otherwise a random published
-// problem, optionally filtered by difficulty.
-async function pickProblemId({ problemSlug, difficulty }) {
+// Priority: explicit slug > explicit difficulty > rating-scaled (if ratingForAuto given) > random.
+async function pickProblemId({ problemSlug, difficulty, ratingForAuto }) {
   if (problemSlug) {
     const result = await pool.query(
       `SELECT id FROM problems WHERE slug = $1 AND is_published = true`,
@@ -18,26 +20,36 @@ async function pickProblemId({ problemSlug, difficulty }) {
     return result.rows[0].id;
   }
 
-  const values = [];
-  let whereClause = 'WHERE is_published = true';
+  let problemId;
   if (difficulty) {
-    values.push(difficulty);
-    whereClause += ` AND difficulty = $${values.length}`;
+    problemId = await randomProblemId(difficulty);
+  } else if (ratingForAuto !== undefined && ratingForAuto !== null) {
+    const result = await pickProblemIdByRating(ratingForAuto);
+    problemId = result.problemId;
+  } else {
+    problemId = await randomProblemId(null);
   }
 
-  const result = await pool.query(
-    `SELECT id FROM problems ${whereClause} ORDER BY RANDOM() LIMIT 1`,
-    values
-  );
-  if (!result.rows[0]) {
+  if (!problemId) {
     const err = new Error('No published problems available for this selection');
     err.status = 400;
     throw err;
   }
-  return result.rows[0].id;
+  return problemId;
 }
 
-// POST /api/matches/open-battles
+// Attaches the chosen problem's basic info so the creator can see what was picked.
+async function withProblemInfo(match) {
+  const problem = await getProblemById(match.problem_id);
+  return {
+    match,
+    problem: problem
+      ? { title: problem.title, slug: problem.slug, difficulty: problem.difficulty }
+      : null,
+  };
+}
+
+// POST /api/matches/open-battles   (casual — random unless slug/difficulty given)
 async function createOpenBattle(req, res) {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -56,7 +68,7 @@ async function createOpenBattle(req, res) {
       minRating: null,
     });
 
-    res.status(201).json({ match });
+    res.status(201).json(await withProblemInfo(match));
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     console.error('Create open battle error:', err);
@@ -76,6 +88,7 @@ async function listOpenBattles(req, res) {
 }
 
 // POST /api/matches/group-battles
+// No slug/difficulty -> scaled by minRating, or the creator's group_battle rating.
 async function createGroupBattle(req, res) {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -85,7 +98,8 @@ async function createGroupBattle(req, res) {
   const { problemSlug, maxPlayers, minRating, difficulty } = req.body;
 
   try {
-    const problemId = await pickProblemId({ problemSlug, difficulty });
+    const ratingForAuto = minRating ?? (await getUserRating(req.userId, 'group_battle'));
+    const problemId = await pickProblemId({ problemSlug, difficulty, ratingForAuto });
 
     const match = await createMatch({
       mode: 'group_battle',
@@ -94,7 +108,7 @@ async function createGroupBattle(req, res) {
       minRating: minRating ?? null,
     });
 
-    res.status(201).json({ match });
+    res.status(201).json(await withProblemInfo(match));
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     console.error('Create group battle error:', err);

@@ -2,6 +2,7 @@ const IORedis = require('ioredis');
 const pool = require('../config/db');
 const { createMatch, addParticipant, startMatch } = require('../models/matchModel');
 const { getProblemById } = require('../models/problemModel');
+const { randomProblemId, pickProblemIdByRating } = require('./difficultyService');
 
 const redis = new IORedis(process.env.REDIS_URL);
 
@@ -9,6 +10,7 @@ const RATING_WINDOW = 200;
 const DEFAULT_RATING = 1200;
 const VALID_DIFFICULTIES = ['easy', 'medium', 'hard'];
 
+// No difficulty chosen = "auto" (scaled by rating), stored under the 'any' key.
 function queueKey(mode, difficulty) {
   const diffPart = difficulty && VALID_DIFFICULTIES.includes(difficulty) ? difficulty : 'any';
   return `matchmaking:queue:${mode}:${diffPart}`;
@@ -57,26 +59,28 @@ async function removeFromQueueKey(key, userId) {
   await redis.zrem(key, userId);
 }
 
-// Picks a random published problem, optionally filtered by difficulty.
+// Explicit difficulty -> use it. Otherwise scale by the pair's average rating.
 async function createMatchForPair(mode, userIdA, userIdB, difficulty) {
-  const values = [];
-  let whereClause = 'WHERE is_published = true';
+  let problemId;
+
   if (difficulty && VALID_DIFFICULTIES.includes(difficulty)) {
-    values.push(difficulty);
-    whereClause += ` AND difficulty = $${values.length}`;
+    problemId = await randomProblemId(difficulty);
+  } else {
+    const [ratingA, ratingB] = await Promise.all([
+      getUserRating(userIdA, mode),
+      getUserRating(userIdB, mode),
+    ]);
+    const result = await pickProblemIdByRating((ratingA + ratingB) / 2);
+    problemId = result.problemId;
   }
 
-  const problemResult = await pool.query(
-    `SELECT id FROM problems ${whereClause} ORDER BY RANDOM() LIMIT 1`,
-    values
-  );
-  if (!problemResult.rows[0]) {
-    throw new Error('No published problems available for this difficulty');
+  if (!problemId) {
+    throw new Error('No published problems available for this selection');
   }
 
   const match = await createMatch({
     mode,
-    problemId: problemResult.rows[0].id,
+    problemId,
     maxPlayers: 2,
     minRating: null,
   });

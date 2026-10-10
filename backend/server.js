@@ -9,6 +9,7 @@ require('./src/config/redis');
 
 const authRoutes = require('./src/routes/authRoutes');
 const problemRoutes = require('./src/routes/problemRoutes');
+const recommendedRoutes = require('./src/routes/recommendedRoutes');
 const submissionRoutes = require('./src/routes/submissionRoutes');
 const matchRoutes = require('./src/routes/matchRoutes');
 const ratingRoutes = require('./src/routes/ratingRoutes');
@@ -38,6 +39,7 @@ app.get('/api/health/db', async (req, res) => {
 });
 
 app.use('/api/auth', authRoutes);
+app.use('/api/problems/recommended', recommendedRoutes); // must come before /api/problems
 app.use('/api/problems', problemRoutes);
 app.use('/api/submissions', submissionRoutes);
 app.use('/api/matches', matchRoutes);

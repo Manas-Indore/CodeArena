@@ -2,7 +2,6 @@ const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
 const IORedis = require('ioredis');
 
-const pool = require('../config/db');
 const { MATCH_EVENTS_CHANNEL } = require('./redisPubSub');
 const {
   createMatch,
@@ -22,6 +21,7 @@ const {
   queueKey,
   VALID_DIFFICULTIES,
 } = require('../services/matchmakingService');
+const { randomProblemId, pickProblemIdByRating } = require('../services/difficultyService');
 
 const MATCHMAKING_MODES = ['speed_coding', 'debug_duel'];
 const CHALLENGE_MODES = ['speed_coding', 'debug_duel'];
@@ -131,7 +131,7 @@ function setupSocket(httpServer) {
           socket.matchmakingQueueKey = result.queueKey;
           socket.emit('queued', {
             mode,
-            difficulty: difficulty || 'any',
+            difficulty: difficulty || 'auto',
             message: 'Searching for an opponent...',
           });
           return;
@@ -172,7 +172,7 @@ function setupSocket(httpServer) {
       try {
         await removeFromQueueKey(queueKey(mode, difficulty), socket.userId);
         socket.matchmakingQueueKey = null;
-        socket.emit('matchmaking_cancelled', { mode, difficulty: difficulty || 'any' });
+        socket.emit('matchmaking_cancelled', { mode, difficulty: difficulty || 'auto' });
       } catch (err) {
         console.error('cancel_matchmaking error:', err);
       }
@@ -194,24 +194,26 @@ function setupSocket(httpServer) {
           return socket.emit('error_message', { error: 'You can only challenge friends' });
         }
 
-        const values = [];
-        let whereClause = 'WHERE is_published = true';
+        // Explicit difficulty wins; otherwise scale by both players' average rating.
+        let problemId;
         if (difficulty) {
-          values.push(difficulty);
-          whereClause += ` AND difficulty = $${values.length}`;
+          problemId = await randomProblemId(difficulty);
+        } else {
+          const [myRating, friendRating] = await Promise.all([
+            getUserRating(socket.userId, mode),
+            getUserRating(friendUserId, mode),
+          ]);
+          const result = await pickProblemIdByRating((myRating + friendRating) / 2);
+          problemId = result.problemId;
         }
 
-        const problemResult = await pool.query(
-          `SELECT id FROM problems ${whereClause} ORDER BY RANDOM() LIMIT 1`,
-          values
-        );
-        if (!problemResult.rows[0]) {
-          return socket.emit('error_message', { error: 'No published problems available for this difficulty' });
+        if (!problemId) {
+          return socket.emit('error_message', { error: 'No published problems available for this selection' });
         }
 
         const match = await createMatch({
           mode,
-          problemId: problemResult.rows[0].id,
+          problemId,
           maxPlayers: 2,
           minRating: null,
         });
@@ -228,14 +230,14 @@ function setupSocket(httpServer) {
         friendSocket.emit('challenge_received', {
           matchId: match.id,
           mode,
-          difficulty: difficulty || 'any',
+          difficulty: difficulty || 'auto',
           fromUserId: socket.userId,
         });
 
         socket.emit('challenge_sent', {
           matchId: match.id,
           mode,
-          difficulty: difficulty || 'any',
+          difficulty: difficulty || 'auto',
           toUserId: friendUserId,
         });
       } catch (err) {
