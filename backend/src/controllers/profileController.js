@@ -6,6 +6,7 @@ const {
 } = require('../models/profileModel');
 const { getUserRatings } = require('../models/ratingModel');
 const { findUserByUsername } = require('../models/userModel');
+const { getStreakInfo } = require('../models/dailyModel');
 
 // GET /api/users/:username/profile  (public — no auth required)
 async function getProfile(req, res) {
@@ -15,10 +16,11 @@ async function getProfile(req, res) {
     const user = await getPublicUserByUsername(username);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    const [ratings, stats, recentMatches] = await Promise.all([
+    const [ratings, stats, recentMatches, streak] = await Promise.all([
       getUserRatings(user.id),
       getPracticeStats(user.id),
       getRecentMatches(user.id, 10),
+      getStreakInfo(user.id),
     ]);
 
     res.json({
@@ -27,6 +29,13 @@ async function getProfile(req, res) {
       practiceStats: {
         problemsSolved: parseInt(stats.problems_solved, 10) || 0,
         totalSubmissions: parseInt(stats.total_submissions, 10) || 0,
+      },
+      dailyStreak: {
+        current: streak.current,
+        longest: streak.longest,
+        totalCompleted: streak.totalCompleted,
+        completedToday: streak.completedToday,
+        recentDates: streak.recentDates, // last 30 completed days, handy for a calendar later
       },
       recentMatches,
     });

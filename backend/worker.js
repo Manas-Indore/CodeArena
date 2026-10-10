@@ -5,6 +5,7 @@ const { connection } = require('./src/config/queue');
 const { getSubmissionById, updateSubmissionResult } = require('./src/models/submissionModel');
 const { getProblemById, getAllTestCasesByProblemId } = require('./src/models/problemModel');
 const { completeMatch } = require('./src/models/matchModel');
+const { recordCompletionIfEligible } = require('./src/models/dailyModel');
 const { publishMatchEvent } = require('./src/config/redisPubSub');
 const { runSubmission } = require('./src/services/judgeService');
 const { applyEloUpdates } = require('./src/services/ratingService');
@@ -49,6 +50,23 @@ const worker = new Worker(
 
     console.log(`Submission ${submissionId} verdict: ${judgeResult.verdict}`);
 
+    // ---- Daily challenge completion ----
+    if (judgeResult.verdict === 'accepted') {
+      try {
+        const completion = await recordCompletionIfEligible(
+          submission.user_id,
+          submission.problem_id,
+          submissionId
+        );
+        if (completion) {
+          console.log(`Daily challenge completed by user ${submission.user_id} for ${completion.challenge_date}`);
+        }
+      } catch (err) {
+        console.error('Daily completion check failed (judging unaffected):', err.message);
+      }
+    }
+
+    // ---- Match integration (Online Mode submissions only) ----
     if (submission.match_id) {
       await publishMatchEvent({
         matchId: submission.match_id,
@@ -71,7 +89,7 @@ const worker = new Worker(
           });
           console.log(`Match ${submission.match_id} completed — winner: ${submission.user_id}`);
 
-          // Open Battles are casual — no rating impact. Everything else counts.
+          // Open Battles are casual — no rating impact.
           if (completed.mode !== 'open_battle') {
             await applyEloUpdates(completed.id, completed.mode, submission.user_id);
             console.log(`Elo updated for match ${completed.id} (mode: ${completed.mode})`);
